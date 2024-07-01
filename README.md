@@ -2,7 +2,7 @@
 Chrono de vitesse pour l'escalade
 
 ## Branchements
-![Schema](./img/schema.png)
+![Schema](./Schema.png)
 
 
 ## Fonctionnement
