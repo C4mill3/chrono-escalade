@@ -1,0 +1,498 @@
+/////////////////////////
+// Boards: ESP32-WROOM-DA Module
+// Boardsz Manager: esp32 2.0.14 //attention en 3.0 NeoMatrix est incompatible a l'heure actuelle
+
+// Library:
+// Adafruit BusIO 1.16.1
+// Adafruit GFX Library 1.11.9
+// Adafruit NeoMatreix 1.3.2
+// Adafruit neoPixel 1.12.2
+
+/////////////////////////
+
+
+///////////////////////// Library -> Adafruit NeoMartrix by Adafruit
+#include <Adafruit_GFX.h>
+#include <Adafruit_NeoMatrix.h>
+#include <Adafruit_NeoPixel.h>
+
+// Définition des broches
+const int startButtonPin = 22; // broched de la plaque depart
+const int stopButtonPin = 23; //broche du buzzer
+const int obstacleSensorPin = 26;  // Broche du capteur infrarouge
+
+// Variables
+unsigned long startTime = 0;
+unsigned long elapsedTime = 0;
+unsigned long StartresetCooldown = 0;
+unsigned long resetCooldown = 0;
+bool isRunning = false;
+
+
+// DATA PIN
+#define DATA_PIN 2
+
+// Configuration de la matrice
+Adafruit_NeoMatrix matrix = Adafruit_NeoMatrix(32, 8, DATA_PIN,
+  NEO_MATRIX_TOP + NEO_MATRIX_COLUMNS + NEO_MATRIX_PROGRESSIVE + NEO_MATRIX_ZIGZAG,
+  NEO_GRB + NEO_KHZ800);
+
+//Variable affichage
+int displayMod=0; //0 correspond au chrono, 1 correspond au texte déroulant, 2 correspond a SNAKE (omg easter egg)
+int luminosite=150;
+unsigned long resetTime=2000; //temps nécessaire pour reset en millieme
+int resetCooldownLed=0;
+uint16_t chronoColor = matrix.Color(255, 0, 0);
+uint16_t readychronoColor = matrix.Color(0, 255, 0);
+uint16_t actualChronoColor = chronoColor;
+uint16_t textColor = matrix.Color(0, 255, 255); //correspond au texte afficher via BLE
+uint16_t cooldownColor = matrix.Color(255, 255, 255);
+String textToDispay;
+
+//Varaible Snake
+int snakeX ;
+int snakeY ;
+int snakeLength;
+int snakeDirection; // 0: right, 1: down, 2: left, 3: up
+int foodX ;
+int foodY;
+bool gameOver;
+int snakeBodyX[32];
+int snakeBodyY[32];
+
+//////////Declaration des fonctions
+void DetectStartStop();
+void ShowChronoOnMatrix(String secondes, String precision);
+void ShowTextOnMatrix(String texte);
+
+void startSnake();
+void resetValue();
+void updateSnake();
+void drawSnake();
+void drawApple();
+void generateFood();
+bool isFoodOnSnake();
+int getX(int index);
+int getY(int index);
+
+/////////BLUETOOTH///////////// Library -> aucune (par defaut avec esp32)
+#include <BLEDevice.h>
+#include <BLEServer.h>
+#include <BLEUtils.h>
+#include <BLE2902.h>
+
+BLEServer *pServer = NULL;
+BLECharacteristic *pTxCharacteristic;
+bool deviceConnected = false;
+bool oldDeviceConnected = false;
+uint8_t txValue = 0;
+
+
+#define SERVICE_UUID           "6E400001-B5A3-F393-E0A9-E50E24DCCA9E" // UART service UUID
+#define CHARACTERISTIC_UUID_RX "6E400002-B5A3-F393-E0A9-E50E24DCCA9E"
+#define CHARACTERISTIC_UUID_TX "6E400003-B5A3-F393-E0A9-E50E24DCCA9E"
+
+class MyServerCallbacks : public BLEServerCallbacks {
+    void onConnect(BLEServer* pServer) {
+        deviceConnected = true;
+    }
+
+    void onDisconnect(BLEServer* pServer) {
+        deviceConnected = false;
+    }
+};
+
+class MyCallbacks : public BLECharacteristicCallbacks {
+  /* gere l'arriver de commande */
+    void onWrite(BLECharacteristic* pCharacteristic) {
+        std::string rxValue = pCharacteristic->getValue();
+
+        //Serial.println(rxValue.c_str()); //pr afficher les entrer pr debug
+        if (rxValue.length() > 0) {
+
+          if(rxValue.compare("!B516")==0){ //fleche haut enfoncé
+            if (displayMod!=2){
+              if(luminosite<=240){
+                luminosite+=10;
+                matrix.setBrightness(luminosite);
+              }
+                String text="Luminosité a: " + String(luminosite) + "/250\n";
+                pTxCharacteristic->setValue(text.c_str());
+                pTxCharacteristic->notify();
+                delay(10); //pour éviter de dépasser la pile 
+            }else if (snakeDirection != 1){
+              snakeDirection=3; // 0: right, 1: down, 2: left, 3: up
+            }
+
+          }else if(rxValue.compare("!B615")==0){ //fleche bas enfoncé
+            if (displayMod!=2){
+              if(luminosite>=10){
+                luminosite-=10;
+                matrix.setBrightness(luminosite);
+              }
+              String text="Luminosité a: " + String(luminosite) + "/250\n";
+              pTxCharacteristic->setValue(text.c_str());
+              pTxCharacteristic->notify();
+              delay(10); //pour éviter de dépasser la pile
+            }else if (snakeDirection != 3){
+              snakeDirection=1; // 0: right, 1: down, 2: left, 3: up
+            }
+
+          }else if(rxValue.compare("!B714")==0 && snakeDirection != 0){ //fleche gauche enfoncé
+            snakeDirection=2; // 0: right, 1: down, 2: left, 3: up
+
+          }else if(rxValue.compare("!B813")==0 && snakeDirection != 2){ //fleche droite enfoncé
+            snakeDirection=0; // 0: right, 1: down, 2: left, 3: up
+
+          }else if(rxValue.compare("!B11:")==0){ //touche 1 enfoncé (reset)
+            startTime = 0;
+            elapsedTime = 0;
+            StartresetCooldown = 0;
+            resetCooldown = 0;
+            isRunning = false;
+          }else if(rxValue.compare("!B219")==0){ //touche 2 enfoncé (snake)
+            if(!isRunning && displayMod!=1 && displayMod!=2){ //vérifie qu'un texte n'est pas en cours d'affichage
+              String text="Snake Time !\n";
+              pTxCharacteristic->setValue(text.c_str());
+              pTxCharacteristic->notify();
+              delay(10); //pour éviter de dépasser la pile 
+              displayMod=2;
+            }
+          }else if(rxValue.compare("!B417")==0){ //touche 4 enfoncé (restart)
+            ESP.restart();
+          }else if(rxValue.compare(0,2,"!C")==0){ //Mode changement de couleur
+            textColor=matrix.Color(rxValue[2],rxValue[3],rxValue[4]);
+          }else if(rxValue.compare(0,2,"!B")!=0){ //si ce n'est pas un code special affiche la chaine de caractère
+            if(!isRunning && displayMod!=1 && displayMod!=2){ //vérifie qu'un texte n'est pas en cours d'affichage
+              displayMod=1;
+              textToDispay=rxValue.c_str();
+            }
+          }
+
+
+        }
+    }
+};
+
+///////////////////END-BLUETOOTH//////////////
+
+void setup() {
+  // Initialisation du port série
+  Serial.begin(115200);
+
+  // Configuration des boutons-poussoirs
+  pinMode(startButtonPin, INPUT_PULLUP);
+  pinMode(stopButtonPin, INPUT_PULLUP);
+  pinMode(obstacleSensorPin, INPUT_PULLUP);
+
+  randomSeed(analogRead(0)); // init une seed random pour snake
+
+  matrix.begin();
+  matrix.setTextWrap(false);
+  matrix.setBrightness(luminosite); //regle la luminosite
+  matrix.setTextColor(chronoColor);  // Couleur du texte
+
+  //////////////////BLUETOOTH//////////
+    // Create the BLE Device
+    BLEDevice::init("Chrono TUVB");
+
+    // Create the BLE Server
+    pServer = BLEDevice::createServer();
+    pServer->setCallbacks(new MyServerCallbacks());
+
+    // Create the BLE Service
+    BLEService *pService = pServer->createService(SERVICE_UUID);
+
+    // Create the BLE Characteristics
+    pTxCharacteristic = pService->createCharacteristic(
+        CHARACTERISTIC_UUID_TX,
+        BLECharacteristic::PROPERTY_NOTIFY
+    );
+
+    pTxCharacteristic->addDescriptor(new BLE2902());
+
+    BLECharacteristic *pRxCharacteristic = pService->createCharacteristic(
+        CHARACTERISTIC_UUID_RX,
+        BLECharacteristic::PROPERTY_WRITE
+    );
+
+    pRxCharacteristic->setCallbacks(new MyCallbacks());
+
+    // Start the service
+    pService->start();
+
+    // Start advertising
+    pServer->getAdvertising()->start();
+    Serial.println("Esp Demarrer avec succès.");
+}
+
+void loop() {
+
+  if(displayMod==0){ // si le mod chrono est activer (pour éviter la superposition a cause de l'asyncrone )
+    DetectStartStop();
+
+    // Calcul du temps écoulé
+    if (isRunning){
+      elapsedTime = millis() - startTime;
+    }
+    // Pour générer une chaine de caractere au millieme prêt (DEC indique qu'on utilise la Base decimal, jsp pourquoi j'ai eu le droit a de l'hexa avant de le mettre)
+    String secondes = String((elapsedTime / 10000) % 10, DEC) + String((elapsedTime / 1000) % 10, DEC);
+    String precision = String((elapsedTime % 1000) / 100, DEC) + String((elapsedTime % 100) / 10, DEC) + String(elapsedTime % 10, DEC);
+    ShowChronoOnMatrix(secondes,precision);
+  }else if(displayMod==1){
+    ShowTextOnMatrix(textToDispay); //mettre la var global en arg permet de la realouer ailleur en memoire au cas ou une seconde entrer arrive en async par le BT
+  }else if(displayMod==2){
+    startSnake();
+  }
+
+  if (!deviceConnected && oldDeviceConnected) {
+      delay(500);
+      pServer->startAdvertising();
+      Serial.println("Appareil déconnecter, recherche de connexion activer");
+      oldDeviceConnected = deviceConnected;
+  }
+
+  if (deviceConnected && !oldDeviceConnected) {
+      Serial.println("Un appareil vient de se connecter");
+      oldDeviceConnected = deviceConnected;
+  }
+}
+
+//////////////////////////////////////////////:
+
+void DetectStartStop(){
+  if (digitalRead(startButtonPin) == LOW){ // Tant que la plaque est enfoncé le chrono est reset 
+    if (StartresetCooldown == 0) {
+      StartresetCooldown = millis();
+      resetCooldown = 0;
+    } else if (resetCooldown < resetTime){
+      resetCooldown = millis() - StartresetCooldown;
+      resetCooldownLed = int(resetCooldown / (resetTime / 32));
+    } else{ //reset
+      resetCooldownLed = 32;
+      actualChronoColor=readychronoColor;  // Couleur du texte
+      startTime = millis();
+      elapsedTime = millis() - startTime;
+      isRunning = true;
+    }
+
+  }else{
+    actualChronoColor=chronoColor;  // Couleur du texte
+    StartresetCooldown = 0;
+    resetCooldownLed = 0;
+  }
+  
+  if ( ((digitalRead(obstacleSensorPin) == LOW) || (digitalRead(stopButtonPin) == LOW)) && isRunning ) {
+    // Arrête le chronomètre si infra détecte ou si bouton presser
+    elapsedTime = millis() - startTime;
+    isRunning = false;
+
+    String secondes = String((elapsedTime / 10000) % 10, DEC) + String((elapsedTime / 1000) % 10, DEC);
+    String precision = String((elapsedTime % 1000) / 100, DEC) + String((elapsedTime % 100) / 10, DEC) + String(elapsedTime % 10, DEC);
+    String text= String("Temps: " + secondes + "." + precision + "\n");
+    pTxCharacteristic->setValue(text.c_str());
+    pTxCharacteristic->notify();
+    delay(10);
+
+  } else if (elapsedTime>=99999 && isRunning) {
+    // Arrête le chronomètre si temps > 99,999 sec
+    elapsedTime = 99999;
+    isRunning = false;
+  }
+
+}
+
+void ShowChronoOnMatrix(String secondes, String precision){
+  /* affiche le txt donner en param sur la matrice et dans le serial monitor  */
+  
+  //Serial.println(secondes + "." + precision); //Affiche le texte dans la console pr debug
+
+  matrix.fillScreen(0);  // Efface l'écran (remplit de noir tt les pixels)
+  
+  matrix.setTextColor(actualChronoColor);
+
+  matrix.setCursor(0, 1);  // Place le curseur au coin supérieur gauche
+  matrix.print(secondes);  // print le texte sur la matrice (en mémoire pour l'instant)
+  
+  //affiche le carré de pixel qui remplace le point/virgule
+  matrix.drawRect(12, 6, 2, 2, actualChronoColor);
+
+  matrix.setCursor(15, 1);  // Place le curseur au millieu supérieur gauche
+  matrix.print(precision);  // print le texte sur la matrice (en mémoire pour l'instant)
+
+  matrix.drawRect(-1, 0, resetCooldownLed+1, 1, cooldownColor); //bar de chargement 
+
+  matrix.show();  // affiche ce qui est en mémoire
+}
+
+void ShowTextOnMatrix(String texte){
+  int x_showtext = matrix.width(); // initialise au point le plus a droite (pas opti)
+  int end = (texte.length()*6)*(-1); //6 --> taille d'un caractère + son espace
+  matrix.setTextColor(textColor);
+  while(x_showtext > end){ //
+    matrix.fillScreen(0);
+    matrix.setCursor(x_showtext,0);
+    matrix.print(texte);
+    matrix.show();
+    delay(100);
+    x_showtext--; //décremente pour aller vers la gauche
+  }
+  displayMod=0; //retourne au mod par défaut (le chrono)
+}
+
+
+/////////////////////// START SNAKE ////////////////////////////
+void startSnake(){
+  resetValue();
+  while (!gameOver){
+    delay(75); // 150 bug mais 2x 75 non
+    updateSnake();
+    drawSnake();
+    delay(75);
+  }
+  matrix.fillScreen(0);
+  drawApple();
+  matrix.setCursor(9, 1);
+  matrix.setTextColor(matrix.Color(255, 0, 0));
+  matrix.print(snakeLength-3); //score | taille du snake - taille par defaut
+  matrix.show();
+  delay(2000);
+
+  displayMod=0;
+  String text="Snake Score:" + String(snakeLength-3) + "\n"; //score | taille du snake - taille par defaut
+  pTxCharacteristic->setValue(text.c_str());
+  pTxCharacteristic->notify();
+  delay(10); //pour éviter de dépasser la pile 
+}
+
+
+void resetValue(){
+  snakeX = 0;
+  snakeY = 0;
+  snakeLength = 3;
+  snakeDirection = 0; // 0: right, 1: down, 2: left, 3: up
+  gameOver = false;
+  generateFood();
+  for (int i = 0; i < 32; i++) {
+    snakeBodyX[i] = 0;
+    snakeBodyY[i] = 0;
+  }
+}
+
+
+void updateSnake() {
+  int newX = snakeX;
+  int newY = snakeY;
+  switch (snakeDirection) {
+    case 0: // Right
+      newX = snakeX + 1;
+      break;
+    case 1: // Down
+      newY = snakeY + 1;
+      break;
+    case 2: // Left
+      newX = snakeX - 1;
+      break;
+    case 3: // Up
+      newY = snakeY - 1;
+      break;
+  }
+  if (newX == foodX && newY == foodY) {
+    snakeLength++;
+    for (int i = snakeLength - 1; i > 0; i--) {
+      snakeBodyX[i] = snakeBodyX[i - 1];
+      snakeBodyY[i] = snakeBodyY[i - 1];
+    }
+    snakeBodyX[0] = newX;
+    snakeBodyY[0] = newY;
+    generateFood();
+
+  } else if (newX < 0 || newX >= 32 || newY < 0 || newY >= 8) {
+    gameOver = true;
+  } else {
+    for (int i = snakeLength; i > 0; i--) {
+      snakeBodyX[i] = snakeBodyX[i - 1];
+      snakeBodyY[i] = snakeBodyY[i - 1];
+    }
+    snakeBodyX[0] = newX;
+    snakeBodyY[0] = newY;
+    for (int i = 0; i < snakeLength; i++) {
+      if (i > 0 && (snakeBodyX[i] == snakeBodyX[0] && snakeBodyY[i] == snakeBodyY[0])) {
+        gameOver = true;
+      }
+    }
+  }
+  snakeX = newX;
+  snakeY = newY;
+}
+
+void drawSnake() {
+  matrix.fillScreen(0);
+  matrix.drawPixel(foodX, foodY, matrix.Color(255, 0, 0));
+  for (int i = 0; i < snakeLength; i++) {
+    matrix.drawPixel(snakeBodyX[i], snakeBodyY[i], matrix.Color(0, 255, 0));
+  }
+  matrix.show();
+}
+
+void generateFood() {
+  foodX = random(32);
+  foodY = random(8);
+  while (isFoodOnSnake()) {
+    foodX = random(32);
+    foodY = random(8);
+  }
+}
+
+
+bool isFoodOnSnake() {
+
+  for (int i = 0; i < snakeLength; i++) {
+    int x = getX(i);
+    int y = getY(i);
+    if (x == foodX && y == foodY) {
+      return true;
+    }
+  }
+  return false;
+}
+
+
+int getX(int index) {
+  return (snakeX - index) % 32;
+}
+
+
+int getY(int index) {
+  return (snakeY - index) % 8;
+}
+
+void drawApple() {
+  //attention pas de clear de l'ecran
+  // le tdc que je suis a mis plusieurs teintes de rouge et ça se voit meme pas du coup j'enleve
+
+  //ligne 0
+  int y=0;
+  matrix.drawPixel(5, y, matrix.Color(0, 255, 0)); // vert
+
+  //ligne 1
+  y=1;
+  matrix.drawPixel(1, y, matrix.Color(0, 255, 0)); // vert
+  matrix.drawPixel(2, y, matrix.Color(0, 255, 0)); // vert
+  matrix.drawPixel(4, y, matrix.Color(0, 255, 0)); // vert
+
+  //ligne 2
+  y=2;
+  matrix.drawPixel(2, y, matrix.Color(0, 255, 0)); // vert
+  matrix.drawPixel(3, y, matrix.Color(0, 255, 0)); // vert
+  matrix.drawPixel(4, y, matrix.Color(0, 255, 0)); // vert
+  matrix.drawPixel(5, y, matrix.Color(255, 0, 0)); // rouge
+  matrix.drawPixel(6, y, matrix.Color(255, 0, 0)); // rouge
+
+  //ligne 3 a 7
+  matrix.fillRect(1, 3, 7, 4, matrix.Color(255, 0, 0)); // grand rectangle rouge au centre
+  matrix.fillRect(2, 7, 5, 1, matrix.Color(255, 0, 0)); // petite ligne rouge en bas
+  
+}
+
+///////////////////////  END SNAKE  ////////////////////////////
